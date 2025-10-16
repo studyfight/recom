@@ -1,0 +1,18 @@
+{
+  "married_only_keywords": ["(限已婚)", "限已婚"],
+  "female_specific_keywords": ["妇科", "子宫", "卵巢", "乳腺", "HPV", "TCT", "阴道"],
+  "male_specific_keywords": ["前列腺", "PSA"],
+  "child_preferred_keywords": ["骨龄", "儿童", "青少年"],
+  "highlights_map": {
+    "颈动脉": "颈动脉超声",
+    "骨密度": "骨密度",
+    "动态血压": "24小时动态血压",
+    "胃镜": "胃镜",
+    "结肠镜": "结肠镜",
+    "胃肠镜": "胃肠镜",
+    "心动图": "心脏超声",
+    "心脏彩超": "心脏彩超",
+    "HPV": "HPV",
+    "TCT": "TCT"
+  }
+} 

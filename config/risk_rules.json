@@ -1,0 +1,60 @@
+{
+  "CANCER_STOMACH": {
+    "label": "胃癌相关风险",
+    "triggers": {
+      "family_history": ["胃癌"],
+      "medical_history": ["胃溃疡", "胃息肉", "慢性萎缩性胃炎", "恶性贫血", "残胃", "肥厚性胃炎", "幽门螺杆菌", "Hp"],
+      "lifestyle_factors": ["高盐", "腌制", "吸烟", "重度饮酒"],
+      "region": ["胃癌高发区"]
+    }
+  },
+  "CANCER_LIVER": {
+    "label": "肝癌相关风险",
+    "triggers": {
+      "family_history": ["肝癌"],
+      "medical_history": ["乙肝", "乙型肝炎", "慢性肝炎", "肝硬化", "HBV"],
+      "lifestyle_factors": ["长期饮酒", "重度饮酒"]
+    }
+  },
+  "CANCER_COLON": {
+    "label": "结直肠癌相关风险",
+    "triggers": {
+      "family_history": ["结直肠癌", "直肠癌", "结肠癌"],
+      "medical_history": ["慢性结肠炎", "肠息肉", "腺瘤", "炎症性肠病", "便血", "粘液便", "腹泻", "腹痛", "排便习惯改变"],
+      "age_hint": ["40岁及以上", "≥40"]
+    }
+  },
+  "CANCER_ESOPHAGUS": {
+    "label": "食管癌相关风险",
+    "triggers": {
+      "family_history": ["食管癌"],
+      "region": ["食管癌高发"],
+      "medical_history": ["Barrett", "癌前病变", "鳞癌"],
+      "lifestyle_factors": ["重度吸烟", "重度饮酒", "热烫饮食", "进食过快", "室内空气污染", "牙齿缺失"],
+      "symptoms": ["吞咽困难", "哽噎感"]
+    }
+  },
+  "CANCER_BREAST": {
+    "label": "乳腺癌相关风险",
+    "triggers": {
+      "family_history": ["乳腺癌"],
+      "medical_history": ["乳腺导管不典型增生", "小叶不典型增生", "小叶原位癌"],
+      "treatment_history": ["胸部放疗"]
+    }
+  },
+  "CANCER_FEMALE_REPRODUCTIVE": {
+    "label": "生殖肿瘤相关风险",
+    "triggers": {
+      "family_history": ["宫颈癌", "卵巢癌", "子宫内膜癌"],
+      "medical_history": ["多囊卵巢", "无排卵", "月经异常", "不孕", "高血压", "糖尿病", "肥胖", "初潮早", "绝经晚"]
+    }
+  },
+  "CANCER_LUNG": {
+    "label": "肺癌相关风险",
+    "triggers": {
+      "family_history": ["肺癌"],
+      "lifestyle_factors": ["吸烟", "抽烟", "被动吸烟"],
+      "occupational_exposure": ["石棉", "氡", "铍", "铬", "镉", "镍", "硅", "煤烟", "煤尘"]
+    }
+  }
+} 
