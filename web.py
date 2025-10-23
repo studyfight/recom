@@ -39,14 +39,25 @@ app = FastAPI(title="体检套餐推荐系统", version="1.0.0")
 class WebRecommendIn(BaseModel):
 	"""套餐推荐请求模型
 	
-	用户区分机制：
-	- user_id: 必填，用于区分不同用户的请求
-	- 每个请求会生成唯一的trace_id用于日志追踪
+	必填参数：
+	- user_id: 用户唯一标识
+	- gender: 性别（male/female），决定套餐类型
+	- age: 年龄，决定体检重点
+	- budget: 预算（元），决定价格范围
+	
+	可选参数（精准匹配加分项）：
+	- purpose: 体检目的
+	- health_concerns: 健康关注点
+	- family_history: 家族病史
+	- lifestyle_factors: 生活习惯
 	"""
-	user_id: str  # 用户唯一标识（必填）- 用于区分不同用户请求
-	age: Optional[int] = None  # 年龄
-	gender: Optional[str] = None  # 性别：male/female/None
-	budget: Optional[float] = None  # 预算（元）
+	# 必填参数
+	user_id: str  # 用户唯一标识
+	gender: str  # 性别：male 或 female
+	age: int  # 年龄（岁）
+	budget: float  # 预算（元）
+	
+	# 可选参数
 	purpose: Optional[str] = None  # 体检目的：常规体检/入职体检/婚前体检/肿瘤筛查等
 	health_concerns: Optional[List[str]] = None  # 健康关注点列表
 	family_history: Optional[List[str]] = None  # 家族病史列表
@@ -94,7 +105,7 @@ def llm_status():
 	return _llm_status_dict()
 
 
-def _filter_items_by_gender(items: List[Dict[str, Any]], gender: str) -> List[Dict[str, Any]]
+def _filter_items_by_gender(items: List[Dict[str, Any]], gender: str) -> List[Dict[str, Any]]:
 	"""根据性别过滤检查项目
 	
 	逻辑说明：
@@ -275,12 +286,37 @@ def package_recommendations(payload: WebRecommendIn) -> WebRecommendOut:
 	# - 每个请求独立处理，互不影响
 	agent = create_recommendation_agent()
 	
+	# ✅ 参数校验（保证推荐质量）
+	if payload.gender not in ["male", "female"]:
+		return WebRecommendOut(
+			trace_id=f"error_{uuid.uuid4().hex[:12]}",
+			status="error",
+			timestamp=datetime.now().isoformat(),
+			data={"error": "性别参数错误，必须为 'male' 或 'female'"}
+		)
+	
+	if not (0 < payload.age < 150):
+		return WebRecommendOut(
+			trace_id=f"error_{uuid.uuid4().hex[:12]}",
+			status="error",
+			timestamp=datetime.now().isoformat(),
+			data={"error": "年龄参数错误，必须为 1-149 之间的整数"}
+		)
+	
+	if payload.budget <= 0:
+		return WebRecommendOut(
+			trace_id=f"error_{uuid.uuid4().hex[:12]}",
+			status="error",
+			timestamp=datetime.now().isoformat(),
+			data={"error": "预算参数错误，必须大于 0"}
+		)
+	
 	# 构造用户画像数据
 	# 注意：这里是请求级别的临时数据，不会持久化或跨请求共享
 	user = {
-		"age": payload.age or 0,
-		"gender": payload.gender or "male",
-		"budget": payload.budget or 0,
+		"age": payload.age,
+		"gender": payload.gender,
+		"budget": payload.budget,
 		"purpose": payload.purpose or "常规体检",
 		"health_concerns": payload.health_concerns or [],
 		"family_history": payload.family_history or [],

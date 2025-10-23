@@ -2,8 +2,66 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 import os
+import json
+from pathlib import Path
 
 # 轻量问答引擎：优先尝试调用大模型；缺省走规则兜底，保证离线可跑
+
+# ========== 加载医院体检注意事项（从JSON配置文件） ==========
+def _load_hospital_notice() -> str:
+	"""从JSON配置文件加载医院注意事项
+	
+	优先从 config/hospital_notice.json 加载，失败则使用默认值
+	"""
+	try:
+		config_path = Path(__file__).parent / "config" / "hospital_notice.json"
+		if config_path.exists():
+			with open(config_path, "r", encoding="utf-8") as f:
+				data = json.load(f)
+				content = data.get("content", "")
+				
+				# 如果是数组，用换行符连接；如果是字符串，直接返回
+				if isinstance(content, list):
+					return "\n".join(content)
+				else:
+					return content
+	except Exception as e:
+		print(f"Warning: 加载医院通知配置失败: {e}")
+	
+	# 默认值
+	return "【体检注意事项】\n请咨询体检中心了解详细信息。"
+
+# 加载医院通知（模块级别，只加载一次）
+HOSPITAL_NOTICE = _load_hospital_notice()
+
+# ========== 加载完整套餐库（第二层上下文） ==========
+def _load_all_packages() -> str:
+	"""加载完整套餐库作为第二层上下文
+	
+	用于回答推荐外的套餐查询，例如“还有什么其他套餐”
+	"""
+	try:
+		from recom2.data import load_packages
+		packages = load_packages()
+		
+		if not packages:
+			return ""
+		
+		# 格式化所有套餐信息（简略版）
+		lines = ["【完整套餐库】", ""]
+		for pkg in packages:
+			name = pkg.get("name", "")
+			price = pkg.get("price", 0)
+			summary = pkg.get("summary_items", [])
+			lines.append(f"{name}(￥{price})：{', '.join(summary[:5])}...")
+		
+		return "\n".join(lines)
+	except Exception as e:
+		print(f"Warning: 加载完整套餐库失败: {e}")
+		return ""
+
+# 加载完整套餐库（模块级别，只加载一次）
+ALL_PACKAGES_CONTEXT = _load_all_packages()
 
 SYSTEM_PROMPT = os.getenv("LLM_SYSTEM_PROMPT", (
 	"你是专业的体检套餐顾问，请用通俗易懂的语言回答用户问题。\n\n"
@@ -127,22 +185,52 @@ def _norm(s: str) -> str:
 
 
 def _summarize_packages(pkgs: List[Dict[str, Any]], top_n: int = 3) -> Tuple[str, List[str]]:
-	"""生成对比用的简要上下文与亮点要点列表。"""
+	"""生成对比用的简要上下文与亮点要点列表。
+	
+	✅ 兼容两种数据格式：
+	1. 直接格式：{"name": "xx", "price": 100, "score": 1.5, ...}
+	2. 嵌套格式：{"package_name": "xx", "package_info": {"name": "xx", "price": 100}, "score": 1.5, ...}
+	"""
 	if not pkgs:
 		return "", []
 	pkgs = pkgs[:top_n]
 	rows = []
 	highlights: List[str] = []
+	
 	for p in pkgs:
-		name = p.get("name")
-		price = p.get("price")
-		score = p.get("score")
-		diff = p.get("diff_items") or []
-		tags = p.get("tags") or []
-		reason = p.get("reason") or ""
-		rows.append(f"{name}｜¥{price}｜分数{score}｜亮点：{', '.join(diff) if diff else '-'}｜标签：{', '.join(tags) if tags else '-'}")
+		# ✅ 兼容两种格式
+		package_info = p.get("package_info", {})
+		
+		# 优先从 package_info 中取，其次直接从 p 中取
+		name = package_info.get("name") or p.get("package_name") or p.get("name") or "未知套餐"
+		price = package_info.get("price") or p.get("price") or 0
+		score = p.get("score") or 0
+		
+		# 亮点/标签：优先从 package_info，其次从 p
+		diff = (package_info.get("highlights_parsed") or 
+		        package_info.get("diff_items") or 
+		        p.get("diff_items") or 
+		        p.get("filtered_key_features") or [])
+		
+		tags = (package_info.get("tags") or 
+		        p.get("tags") or [])
+		
+		# 推荐理由：优先从 p，其次从 package_info
+		reason = (p.get("recommendation_reason") or 
+		          p.get("reason") or 
+		          package_info.get("recommendation_reason") or 
+		          package_info.get("reason") or "")
+		
+		# 格式化输出
+		diff_str = ', '.join(diff[:3]) if diff else '-'  # 只显示前3个亮点
+		tags_str = ', '.join(tags[:3]) if tags else '-'  # 只显示前3个标签
+		reason_str = reason[:100] + '...' if len(reason) > 100 else reason  # 理由截断
+		
+		rows.append(f"{name}｜￥{price}｜分数{score:.2f}｜亮点：{diff_str}｜标签：{tags_str}｜理由：{reason_str}")
+		
 		if diff:
 			highlights.extend(diff)
+	
 	ctx = "\n".join(rows)
 	return ctx, list(dict.fromkeys(highlights))
 
@@ -239,25 +327,195 @@ def _try_llm(prompt: str) -> Optional[str]:
 		return None
 
 
+def _classify_question(question: str) -> str:
+	"""【极简版】判断问题是否在三层上下文范围内
+	
+	三层上下文:推荐结果 + 完整套餐库 + 医院注意事项
+	
+	返回值:
+	- 'related': 与体检/套餐/医院相关 (都可以回答)
+	- 'out_of_scope': 明显无关的问题
+	"""
+	q_lower = question.lower()
+	
+	# 宽泛匹配: 只要和体检/套餐/医院相关, 都认为在范围内
+	related_keywords = [
+		# 体检相关
+		"体检", "检查", "检测", "筛查",
+		# 套餐相关
+		"套餐", "推荐", "选", "项目", "包含", "比较", "价格", "费用", "多少钱",
+		# 医院相关
+		"医院", "体检中心", "地址", "位置", "怎么走", "在哪",
+		# 注意事项
+		"注意", "准备", "空腹", "须知", "禁食",
+		# 健康相关
+		"症状", "疾病", "风险", "健康", "指标",
+		# 其他
+		"适合", "理由", "为什么", "哪个", "怎么",
+	]
+	
+	if _contains_any(q_lower, related_keywords):
+		return 'related'
+	
+	# 其他问题 (明显无关)
+	return 'out_of_scope'
+
+
+def _detect_scope(question: str, has_recommendation: bool) -> str:
+	"""判断用户问的是推荐结果还是其他套餐
+	
+	返回值:
+	- 'recommendation': 问的是推荐结果
+	- 'other_packages': 问的是其他套餐
+	- 'unclear': 不明确,需要根据上下文判断
+	"""
+	q_lower = question.lower()
+	
+	# 1. 明确说明想看其他/更多套餐
+	other_keywords = [
+		"还有什么", "还有哪些", "其他套餐", "更多套餐", 
+		"除了这些", "除此之外", "别的套餐",
+		"推荐其他", "推荐更多", "补充推荐"
+	]
+	if _contains_any(q_lower, other_keywords):
+		return 'other_packages'
+	
+	# 2. 指代词: "这些"/"它们"/"这几个" -> 推荐结果
+	recommendation_pronouns = [
+		"这些套餐", "这些", "它们", "这几个", 
+		"上面的", "上述", "以上",
+		"给我推荐的", "你推荐的"
+	]
+	if _contains_any(q_lower, recommendation_pronouns) and has_recommendation:
+		return 'recommendation'
+	
+	# 3. 默认策略: 如果有推荐结果,默认问的是推荐结果
+	if has_recommendation:
+		return 'recommendation'
+	
+	# 4. 没有推荐结果,返回不明确(应该提示用户先生成推荐)
+	return 'unclear'
+
+
+def _build_guide_by_type(question_type: str) -> Optional[str]:
+	"""【极简版】根据问题类型生成引导词
+	
+	返回None表示不回答(out_of_scope)
+	"""
+	
+	if question_type == 'related':
+		# 三层上下文相关问题: 用通用思考链引导词
+		return (
+			"请基于上下文灵活回答用户问题:\n\n"
+			
+			"⚠️ 关键提醒: 当用户说'这些套餐''它们''这几个'时,指的是'推荐结果'里的套餐,不是完整套餐库!\n\n"
+			
+			"第一步: 判断用户想了解什么(心里思考,不要输出)\n"
+			"- 套餐推荐理由? 项目列表? 比较选择? 价格信息?\n"
+			"- 体检注意事项? 医院位置? 其他相关信息?\n\n"
+			
+			"第二步: 选择最合适的回答方式\n"
+			"- 问'为什么推荐/理由': 直接解释推荐结果里每个套餐匹配的需求点\n"
+			"- 问'有哪些项目/包含什么': 按类别列举推荐结果里的项目\n"
+			"- 问'比较/选哪个/哪个更好': 使用【结论】【对比】三段式,对比推荐结果里的套餐\n"
+			"- 问'价格/多少钱': 直接列出推荐结果里的套餐价格\n"
+			"- 问'还有什么其他套餐': 这时才使用完整套餐库推荐更多选择\n"
+			"- 问'医院位置/地址/怎么走': 根据医院注意事项回答\n"
+			"- 问'注意事项/准备/空腹': 根据医院注意事项回答\n\n"
+			
+			"【关键原则】\n"
+			"- 优先使用'第一层:推荐结果',只有问'还有其他套餐'才用第二层\n"
+			"- 紧扣用户问题,不要答非所问\n"
+			"- 只在需要对比选择时才用固定结构\n"
+			"- 回答要详细充实,但形式灵活\n"
+			"- 如果上下文中没有相关信息,明确说明'无法根据现有信息回答'\n"
+			"- 不要编造上下文中没有的信息\n"
+		)
+	
+	else:  # out_of_scope
+		return None
+
+
 def build_prompt(question: str, context_text: str) -> str:
-	guide = (
-		"请基于套餐上下文详细回答问题：\n\n"
-		"- 若问比较/推荐：严格按以下结构回答，不要添加其他部分\n"
-		"  1. 【结论】首推分数最高的套餐，解释为什么它分数高（匹配了哪些需求/风险点）\n"
-		"  2. 【对比】逐个对比各套餐：价格、核心项目、适合人群、分数，每个套餐2-3段话说明特点和优劣\n"
-		"  3. 【补充建议】如果其他套餐有明显优势（性价比、特殊项目、适合特定症状），补充说明'如果您有XX情况，也可以考虑XX套餐'\n"
-		"  禁止：不要添加【项目解释】【体检前注意】等其他部分（除非用户明确询问）\n\n"
-		"- 若问某项目（单独询问某个检查项目）：给【项目解释】（是什么、检查什么、临床意义、适合谁），每点展开说明\n\n"
-		"- 若问注意事项/准备（明确提到'注意'、'准备'、'空腹'等）：给【体检前注意】（通用3-5条 + 专项注意），说明原因和做法\n\n"
-		"回答要充实详细，每个要点都要展开说明。用简洁的文字表达，不要使用过多markdown符号或emoji。\n"
+	"""【混合方案】构建问答提示词
+	
+	✅ 自动包含三层上下文：
+	1. 第一层：推荐结果（context_text）
+	2. 第二层：完整套餐库（ALL_PACKAGES_CONTEXT）
+	3. 第三层：医院注意事项（HOSPITAL_NOTICE）
+	
+	✅ 混合方案：
+	- 明确的问题类型（推荐理由、项目列表、比较选择等）→ 使用精准引导词（方案一）
+	- 不明确的问题（general）→ 使用思考链引导词（方案二）
+	"""
+	# ✅ 构建完整三层上下文 (注明优先级)
+	full_context_parts = []
+	
+	# 第一层: 推荐结果 (最高优先级)
+	if context_text:
+		full_context_parts.append(
+			"【第一层上下文: 推荐结果】\n"
+			"⚠️ 重要: 当用户说'这些套餐''它们'时,指的是下面这些推荐结果,不是完整套餐库!\n\n"
+			f"{context_text}"
+		)
+	
+	# 第二层: 完整套餐库 (仅当问'还有什么其他套餐'时使用)
+	if ALL_PACKAGES_CONTEXT:
+		full_context_parts.append(
+			"【第二层上下文: 完整套餐库】\n"
+			"⚠️ 仅当用户明确问'还有什么其他套餐'时才使用这层!\n\n"
+			f"{ALL_PACKAGES_CONTEXT}"
+		)
+	
+	# 第三层: 医院注意事项
+	if HOSPITAL_NOTICE:
+		full_context_parts.append(
+			"【第三层上下文: 医院注意事项】\n"
+			f"{HOSPITAL_NOTICE}"
+		)
+	
+	full_context = "\n\n".join(full_context_parts)
+	
+	# ✅ 混合方案：先分类，再生成对应的引导词
+	question_type = _classify_question(question)
+	guide = _build_guide_by_type(question_type)
+	
+	# 通用回答要求
+	common_requirements = (
+		"\n【回答要求】\n"
+		"- 优先使用'推荐结果'回答,只有问'还有其他套餐'时才用完整套餐库\n"
+		"- 回答要充实详细，每个要点都要展开说明\n"
+		"- 用简洁的文字表达，不要使用过多markdown符号或emoji\n"
+		"- 不要编造上下文中未出现的信息\n"
 	)
-	return f"【系统提示】\n{SYSTEM_PROMPT}\n\n【上下文】\n{context_text}\n\n【问题】{question}\n\n{guide}"
+	
+	# 可选：添加问题类型标记（用于调试和日志）
+	if str(os.getenv("QA_DEBUG", "")).lower() == "true":
+		common_requirements = f"\n[问题类型: {question_type}]{common_requirements}"
+	
+	return f"【系统提示】\n{SYSTEM_PROMPT}\n\n{full_context}\n\n【问题】{question}\n\n{guide}{common_requirements}"
 
 
 def answer_question(last_result: Optional[Dict[str, Any]], question: str) -> str:
-	"""对外主函数：基于last_result上下文回答。"""
+	"""【极简版】对外主函数: 基于last_result上下文回答
+	
+	只要问题在三层上下文范围内(套餐+医院+健康),都回答。超出范围才拒绝。
+	"""
 	if not question or not question.strip():
 		return "请先输入问题。"
+	
+	# ✅ 先判断问题类型
+	question_type = _classify_question(question)
+	
+	# ✅ 如果是超出范围的问题，直接返回友好提示
+	if question_type == 'out_of_scope':
+		return (
+			"抱歉，我只能回答与体检套餐和医院相关的问题：\n\n"
+			"1. 套餐相关：推荐理由、检查项目、比较选择、价格等\n"
+			"2. 医院相关：体检前注意事项、医院位置、交通信息等\n"
+			"3. 健康相关：症状、疾病、风险等与体检相关的问题\n\n"
+			"如有其他问题，请咨询体检中心工作人员。"
+		)
 
 	# 从推荐结果提取候选作为上下文
 	recommended: List[Dict[str, Any]] = []
@@ -266,86 +524,39 @@ def answer_question(last_result: Optional[Dict[str, Any]], question: str) -> str
 		recommended = last_result.get("recommended") or []
 		candidates = last_result.get("candidates") or recommended or []
 	pkgs_for_ctx = recommended or candidates
+	
+	# ✅ 检测用户意图: 问的是推荐结果还是其他套餐
+	scope = _detect_scope(question, has_recommendation=bool(pkgs_for_ctx))
+	
+	# ✅ 如果没有推荐结果,但用户想问推荐结果,给出提示
+	if scope == 'unclear':
+		return (
+			"我注意到当前还没有生成推荐结果。\n\n"
+			"请您先在上方'推荐系统'中填写您的信息：\n"
+			"1. 基本信息：性别、年龄、预算\n"
+			"2. 健康关注：症状、家族病史等\n\n"
+			"生成推荐后，再来这里问我任何问题！"
+		)
+	
+	# ✅ 如果用户问的是其他套餐
+	if scope == 'other_packages':
+		return (
+			"感谢您的问题！您想了解更多其他套餐。\n\n"
+			"建议您：\n"
+			"1. 调整上方'推荐系统'中的选项（如预算、关注点等）\n"
+			"2. 重新生成推荐，系统会给出不同的套餐选择\n\n"
+			"或者直接咨询体检中心工作人员，他们会给您更多建议。"
+		)
+	
 	ctx_text, ctx_highlights = _summarize_packages(pkgs_for_ctx, top_n=3)
 
-	q_lower = question.lower()
-
-	# 1) 项目解释优先命中：若已配置LLM则优先用LLM，失败再回退本地规则；若 LLM_ONLY 则不回退
-	if _contains_any(q_lower, ["是啥", "是什么", "检查什么", "查什么", "做什么", "意义", "用途"]) or any(_norm(k) in _norm(question) for k in ITEM_EXPLAINS.keys()):
-		if _has_llm():
-			ans = _try_llm(build_prompt(question, ctx_text))
-			if ans:
-				# 仅保留【项目解释】一节
-				return _debug_wrap(_filter_sections(ans, ["项目解释"]), "LLM")
-			if _llm_only():
-				return "当前大模型未可用或响应为空，请检查 Key/模型名/网络。"
-		# 规则回退
-	item_explain = _explain_item_by_rules(question)
-	if item_explain:
-		# 仅当问题询问注意/空腹/准备时，才附加注意事项
-		if _contains_any(q_lower, ["注意", "准备", "空腹", "须知", "禁食", "喝水", "药"]):
-			notes = _notes_from_context(ctx_highlights)
-			return _debug_wrap("\n".join([
-				item_explain,
-				"",
-				"【体检前注意】",
-				_format_bullets(notes),
-			]), "规则")
-		# 默认只返回项目解释
-		return _debug_wrap(item_explain, "规则")
-
-	# 2) 体检前注意
-	if _contains_any(q_lower, ["注意", "准备", "空腹", "体检前", "须知", "禁食", "喝水", "药"]):
-		# 若强制或偏好使用LLM，则先走LLM
-		if _has_llm() and (_llm_only() or str(os.getenv("LLM_PREFER_NOTES", "")).lower() == "true"):
-			llm_resp = _try_llm(build_prompt(question, ctx_text))
-			if llm_resp:
-				# 仅保留【体检前注意】一节
-				return _debug_wrap(_filter_sections(llm_resp, ["体检前注意"]), "LLM")
-			if _llm_only():
-				return "当前大模型未可用或响应为空，请检查 Key/模型名/网络。"
-		# 规则回退
-		notes = _notes_from_context(ctx_highlights)
-		return _debug_wrap("\n".join([
-			"【体检前注意】",
-			_format_bullets(notes),
-		]), "规则")
-
-	# 3) 套餐比较/为何选择
-	if _contains_any(q_lower, ["比较", "区别", "选哪个", "推荐哪个", "更推荐哪个", "哪个更推荐", "哪个更合适", "哪个更好", "最推荐", "为什么选", "为何选择", "为什么推荐", "为啥推荐", "为啥选", "推荐原因", "推荐这几个", "怎么选", "如何选", "推荐理由", "哪个好", "差异", "更合适", "更好"]):
-		if not pkgs_for_ctx:
-			return "当前没有推荐结果可用于比较，请先生成上方推荐。"
-		# 对比问题：优先使用LLM（比规则更丰富），除非明确禁用
-		if _has_llm():
-			llm_resp = _try_llm(build_prompt(question, ctx_text))
-			if llm_resp:
-				# 对比问题：不过滤，直接返回完整内容（LLM会按提示词输出【结论】【对比】）
-				return _debug_wrap(llm_resp, "LLM")
-			if _llm_only():
-				return "当前大模型未可用或响应为空，请检查 Key/模型名/网络。"
-		# 规则回退：给出结论+简要对比
-		first = pkgs_for_ctx[0]
-		lines = [
-			"【结论】",
-			f"更推荐『{first.get('name')}』，理由：{first.get('reason') or '综合得分更高'}",
-			"",
-			"【对比】",
-			ctx_text
-		]
-		return _debug_wrap("\n".join(lines), "规则")
-
-	# 4) 其它问题：若有LLM则尝试；LLM_ONLY 失败则直接提示
+	# ✅ 相关问题: 调用大模型回答
 	if _has_llm():
 		llm_resp = _try_llm(build_prompt(question, ctx_text))
 		if llm_resp:
 			return _debug_wrap(llm_resp, "LLM")
 		if _llm_only():
 			return "当前大模型未可用或响应为空，请检查 Key/模型名/网络。"
-
-	# 5) 兜底
-	return _debug_wrap("\n".join([
-		"抱歉，基于现有信息无法准确回答。",
-		"您可以具体到'某个项目'或'两种套餐的比较'。",
-		"先提供通用体检前注意：",
-		_format_bullets(GENERAL_NOTES),
-	]), "规则") 
+	
+	# 简单规则回退
+	return "抱歉，当前无法回答该问题。请稍后重试或咨询体检中心工作人员。" 
