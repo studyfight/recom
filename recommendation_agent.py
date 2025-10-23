@@ -1,7 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-套餐推荐Agent
-根据用户个人信息进行个性化套餐推荐，并提供问答功能
+recom2/recommendation_agent.py - 套餐推荐智能代理
+
+核心功能：
+1. 个性化套餐推荐：基于用户画像多维度评分
+2. 智能问答：回答用户关于套餐和检查项目的问题
+3. 知识库构建：从套餐数据自动提取标签和特征
+
+并发安全设计：
+- 无状态类设计：每个请求创建独立实例
+- 数据不可变：PACKAGES_DATA加载后只读
+- 线程安全：无全局可变状态，支持并发调用
+
+注意事项：
+- last_user_profile存储当前实例的用户信息，仅用于问答上下文
+- 由于web.py中每次请求创建新实例，故不会干扰并发
 """
 
 import json
@@ -19,13 +32,39 @@ def _load_json_or_default(path: str, default: Any) -> Any:
 		pass
 	return default
 
-PACKAGES_DATA = load_packages()
-EXAMINATION_DETAILS: Dict[str, Any] = {}
+# ========== 全局数据加载（只读，线程安全） ==========
+# 注意：这些数据在模块加载时初始化，之后仅供读取
+# 多个并发请求共享同一份数据，无竞争条件
+PACKAGES_DATA = load_packages()  # 加载套餐数据（只读）
+EXAMINATION_DETAILS: Dict[str, Any] = {}  # 检查项目详情（预留）
 
 class PackageRecommendationAgent:
+	"""套餐推荐智能代理
+	
+	设计原则：
+	1. 无状态设计：每个请求创建新实例，避免并发问题
+	2. 配置驱动：关键规则和映射可通过JSON文件配置
+	3. 多维评分：综合年龄、性别、预算、健康关注等因素
+	
+	并发安全：
+	- self.packages和self.examination_details引用全局只读数据
+	- self.last_user_profile仅用于当前实例的上下文保存
+	- 每个请求独立实例，不会跨请求共享状态
+	"""
 	def __init__(self):
+		"""'初始化推荐代理
+		
+		注意：
+		- 由web.py中的create_recommendation_agent()调用
+		- 每次HTTP请求都会创建新实例
+		- 实例生命周期仅限于单次请求
+		"""
+		# 引用全局只读数据（线程安全）
 		self.packages: List[Dict[str, Any]] = PACKAGES_DATA or []
 		self.examination_details = EXAMINATION_DETAILS
+		
+		# 当前实例的用户画像缓存（用于问答上下文）
+		# 注意：由于每次请求创建新实例，此字段不会干扰其他请求
 		self.last_user_profile: Optional[Dict[str, Any]] = None
 		# 先定义关键词映射，供派生标签使用
 		# 优先从 JSON 读取，失败则用内置默认
@@ -484,8 +523,29 @@ class PackageRecommendationAgent:
 		return filtered
 	
 	def calculate_package_score(self, package_name: str, package_info: Dict[str, Any], user_profile: Dict[str, Any]) -> float:
-		"""计算套餐与用户的匹配度得分（动态权重）"""
+		"""计算套餐与用户的匹配度得分
+		
+		评分维度：
+		1. 年龄匹配度：套餐适用年龄范围 vs 用户年龄
+		2. 性别匹配度：过滤性别不符合的套餐
+		3. 预算匹配度：价格 vs 用户预算
+		4. 健康关注匹配：套餐标签 vs 用户关注点
+		5. 目的匹配度：体检目的（入职/婚前/肿瘤筛查等）
+		
+		动态权重：
+		- 根据体检目的动态调整各维度权重
+		- 例：入职体检更关注目的匹配，婚前体检更关注年龄性别
+		
+		Args:
+			package_name: 套餐名称
+			package_info: 套餐信息字典
+			user_profile: 用户画像字典
+			
+		Returns:
+			匹配度得分（0-5分）
+		"""
 		purpose = user_profile.get("purpose", "常规体检")
+		# 获取当前目的的权重配置
 		weights = self._purpose_weights(purpose)
 		score = 0.0
 		age_score = self._calculate_age_score(package_info, user_profile)
@@ -681,8 +741,29 @@ class PackageRecommendationAgent:
 		return max(-0.8, -0.4 * n)
 
 	def recommend_packages(self, user_info: Dict[str, Any], top_n: int = 3) -> List[Dict[str, Any]]:
-		"""推荐套餐"""
+		"""个性化套餐推荐主方法
+		
+		推荐流程：
+		1. 分析用户画像：提取关键特征
+		2. 过滤候选套餐：排除不符合性别、目的的套餐
+		3. 计算匹配度：多维度评分
+		4. 排序返回：按得分递减排序，返回top_n个
+		
+		并发安全：
+		- 此方法无副作用，不修改全局状态
+		- last_user_profile仅用于当前实例的问答上下文
+		- 每次请求独立实例，互不影响
+		
+		Args:
+			user_info: 用户信息字典
+			top_n: 返回推荐数量，默认3个
+			
+		Returns:
+			推荐套餐列表，按得分递减排序
+		"""
+		# 分析用户画像
 		user_profile = self.analyze_user_profile(user_info)
+		# 保存用户画像供问答功能使用（仅当前实例有效）
 		self.last_user_profile = user_profile
 		package_scores: List[Dict[str, Any]] = []
 		target_series = self._purpose_target_series(user_profile.get("purpose", "常规体检"))
@@ -980,7 +1061,20 @@ class PackageRecommendationAgent:
 		return {"violated": violated, "messages": messages}
 
 def create_recommendation_agent():
-	"""创建推荐agent实例"""
+	"""创建推荐Agent实例的工厂函数
+	
+	并发安全关键：
+	- 每次调用返回新的实例
+	- web.py中每个请求都调用此函数
+	- 确保不同用户请求间状态隔离
+	
+	使用示例：
+		agent = create_recommendation_agent()
+		recommendations = agent.recommend_packages(user_info)
+	
+	Returns:
+		PackageRecommendationAgent: 新的推荐代理实例
+	"""
 	return PackageRecommendationAgent()
 
 def list_ui_packages() -> list:
